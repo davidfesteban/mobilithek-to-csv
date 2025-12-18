@@ -232,6 +232,12 @@ function extractFuelPricePublication(doc, { binaryId }) {
     const publicationId = payload.getAttribute("id") || "";
     const publicationType = payload.getAttribute("xsi:type") || extensionName || "";
 
+    const publicationCreator = payload.getElementsByTagNameNS("*", "publicationCreator")[0] || null;
+    const creatorCountry = getText(publicationCreator?.getElementsByTagNameNS("*", "country")[0] || null);
+    const creatorNationalIdentifier = getText(
+      publicationCreator?.getElementsByTagNameNS("*", "nationalIdentifier")[0] || null,
+    );
+
     const stationInfos = Array.from(payload.getElementsByTagNameNS("*", "petrolStationInformation"));
     for (const info of stationInfos) {
       const stationRef = info.getElementsByTagNameNS("*", "petrolStationReference")[0] || null;
@@ -252,6 +258,8 @@ function extractFuelPricePublication(doc, { binaryId }) {
           fuel,
           price,
           date_of_price: dateOfPrice,
+          creator_country: creatorCountry,
+          creator_national_identifier: creatorNationalIdentifier,
           publication_id: publicationId,
           publication_type: publicationType,
           binary_id: binaryId,
@@ -268,6 +276,8 @@ function extractFuelPricePublication(doc, { binaryId }) {
           station_version: stationVersion,
           start_of_period: startOfPeriod,
           end_of_period: endOfPeriod,
+          creator_country: creatorCountry,
+          creator_national_identifier: creatorNationalIdentifier,
           publication_id: publicationId,
           publication_type: publicationType,
           binary_id: binaryId,
@@ -280,13 +290,31 @@ function extractFuelPricePublication(doc, { binaryId }) {
 }
 
 function wideFuelRowsForStation(rows) {
+  const uniqueJoin = (key) => {
+    const set = new Set();
+    for (const r of rows) {
+      const v = r && r[key] !== undefined && r[key] !== null ? String(r[key]).trim() : "";
+      if (v) set.add(v);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b)).join("; ");
+  };
+
   const fuels = Array.from(new Set(rows.map((r) => r.fuel))).filter(Boolean).sort();
   const byDate = groupBy(rows, (r) => r.date_of_price || "");
   const dates = Array.from(byDate.keys()).filter(Boolean).sort();
 
+  const stationId = rows[0] ? rows[0].station_id || "" : "";
+  const creatorCountry = uniqueJoin("creator_country");
+  const creatorNationalIdentifier = uniqueJoin("creator_national_identifier");
+
   const out = [];
   for (const date of dates) {
-    const row = { date_of_price: date };
+    const row = {
+      station_id: stationId,
+      creator_country: creatorCountry,
+      creator_national_identifier: creatorNationalIdentifier,
+      date_of_price: date,
+    };
     for (const fuel of fuels) row[fuel] = "";
     for (const r of byDate.get(date) || []) row[r.fuel] = r.price;
     out.push(row);
@@ -464,8 +492,41 @@ function renderTimeSeriesFromItems(items) {
   }
 
   if (hasFuel) {
+    const longColumns = [
+      "station_id",
+      "station_version",
+      "fuel",
+      "price",
+      "date_of_price",
+      "creator_country",
+      "creator_national_identifier",
+      "publication_id",
+      "publication_type",
+      "binary_id",
+    ];
+
+    const groupOptions = [
+      { key: "station_id", label: "station_id", get: (r) => r.station_id || "(missing station_id)" },
+      { key: "station_version", label: "station_version", get: (r) => r.station_version || "(missing station_version)" },
+      { key: "fuel", label: "fuel", get: (r) => r.fuel || "(missing fuel)" },
+      { key: "price", label: "price", get: (r) => r.price || "(missing price)" },
+      { key: "date_day", label: "date (day)", get: (r) => (r.date_of_price || "").split("T")[0] || "(missing date)" },
+      { key: "date_of_price", label: "date_of_price", get: (r) => r.date_of_price || "(missing date_of_price)" },
+      { key: "creator_country", label: "creator_country", get: (r) => r.creator_country || "(missing creator_country)" },
+      {
+        key: "creator_national_identifier",
+        label: "creator_national_identifier",
+        get: (r) => r.creator_national_identifier || "(missing creator_national_identifier)",
+      },
+      { key: "publication_id", label: "publication_id", get: (r) => r.publication_id || "(missing publication_id)" },
+      { key: "publication_type", label: "publication_type", get: (r) => r.publication_type || "(missing publication_type)" },
+      { key: "binary_id", label: "binary_id", get: (r) => r.binary_id || "(missing binary_id)" },
+    ];
+    const groupByKey = new Map(groupOptions.map((o) => [o.key, o]));
+    const groupByDefault = "station_id";
+
     const byStation = groupBy(fuelRows, (r) => r.station_id || "(missing station_id)");
-    const stations = Array.from(byStation.keys()).sort();
+    const stationCount = new Set(fuelRows.map((r) => r.station_id).filter(Boolean)).size;
 
     const card = document.createElement("div");
     card.className = "result";
@@ -473,64 +534,130 @@ function renderTimeSeriesFromItems(items) {
       <h3>Fuel prices (time series)</h3>
       <div class="meta">
         <div><code>rows</code>: ${fuelRows.length}</div>
-        <div><code>stations</code>: ${stations.length}</div>
+        <div><code>stations</code>: ${stationCount}</div>
       </div>
       <div class="downloads">
         <button class="btn primary" data-action="download-fuel-all">Download all (long CSV)</button>
       </div>
+      <div class="group-controls">
+        <div class="muted small">Group by</div>
+        <div class="group-buttons" data-kind="group-buttons"></div>
+      </div>
       <div class="field">
-        <label for="fuelFilter">Filter station id</label>
+        <label for="fuelFilter">Filter groups</label>
         <input id="fuelFilter" type="text" spellcheck="false" placeholder="Type to filter…">
       </div>
       <div class="table-wrap"><table class="table" data-kind="fuel">
         <thead><tr>
-          <th>Station id</th>
+          <th data-kind="group-th">Group</th>
           <th>Rows</th>
           <th>Date range</th>
           <th>Fuels</th>
+          <th>Creators</th>
+          <th>Countries</th>
           <th>Download</th>
         </tr></thead>
         <tbody></tbody>
       </table></div>
-      <details class="details" data-kind="preview">
+      <details class="details" data-kind="preview-wide">
         <summary>Preview station (wide table)</summary>
         <div class="field">
           <label for="fuelPreviewStation">Station id</label>
-          <input id="fuelPreviewStation" type="text" spellcheck="false" placeholder="Click a station above or paste id…">
+          <input id="fuelPreviewStation" type="text" spellcheck="false" placeholder="Click a station row above or paste id…">
         </div>
+        <div class="meta" data-kind="fuel-preview-wide-meta"></div>
         <div class="table-wrap"><table class="table" data-kind="fuel-preview">
           <thead></thead>
           <tbody></tbody>
         </table></div>
         <p class="muted small" data-kind="fuel-preview-hint"></p>
       </details>
+      <details class="details" data-kind="preview-long">
+        <summary>Preview group (long rows: all columns)</summary>
+        <div class="field">
+          <label for="fuelPreviewGroup" data-kind="fuelPreviewGroupLabel">Group value</label>
+          <input id="fuelPreviewGroup" type="text" spellcheck="false" placeholder="Click a group row above or paste value…">
+        </div>
+        <div class="downloads">
+          <button class="btn" data-action="download-group-long">Download group (long CSV)</button>
+          <button class="btn" data-action="download-group-wide">Download group (wide CSV)</button>
+        </div>
+        <div class="table-wrap"><table class="table" data-kind="fuel-preview-long">
+          <thead></thead>
+          <tbody></tbody>
+        </table></div>
+        <p class="muted small" data-kind="fuel-preview-long-hint"></p>
+      </details>
     `;
 
     const downloadAll = card.querySelector('[data-action="download-fuel-all"]');
     downloadAll.addEventListener("click", () => {
       const sorted = [...fuelRows].sort((a, b) => String(a.date_of_price).localeCompare(String(b.date_of_price)));
-      downloadCsv("fuel_prices_long.csv", sorted, [
-        "station_id",
-        "station_version",
-        "fuel",
-        "price",
-        "date_of_price",
-        "publication_id",
-        "publication_type",
-        "binary_id",
-      ]);
+      downloadCsv("fuel_prices_long.csv", sorted, longColumns);
     });
 
+    let activeGroupKey = groupByDefault;
+    let byGroup = new Map();
+    let groupKeys = [];
+
+    const groupButtons = card.querySelector('[data-kind="group-buttons"]');
+    const groupTh = card.querySelector('[data-kind="group-th"]');
     const tbody = card.querySelector('table[data-kind="fuel"] tbody');
     const filterInput = card.querySelector("#fuelFilter");
-    const previewDetails = card.querySelector('details[data-kind="preview"]');
+
+    const previewWideDetails = card.querySelector('details[data-kind="preview-wide"]');
     const previewInput = card.querySelector("#fuelPreviewStation");
+    const previewWideMeta = card.querySelector('[data-kind="fuel-preview-wide-meta"]');
     const previewThead = card.querySelector('table[data-kind="fuel-preview"] thead');
     const previewTbody = card.querySelector('table[data-kind="fuel-preview"] tbody');
     const previewHint = card.querySelector('[data-kind="fuel-preview-hint"]');
 
-    const renderPreview = () => {
+    const previewLongDetails = card.querySelector('details[data-kind="preview-long"]');
+    const previewGroupLabel = card.querySelector('[data-kind="fuelPreviewGroupLabel"]');
+    const previewGroupInput = card.querySelector("#fuelPreviewGroup");
+    const previewLongDownload = card.querySelector('[data-action="download-group-long"]');
+    const previewWideDownload = card.querySelector('[data-action="download-group-wide"]');
+    const previewLongThead = card.querySelector('table[data-kind="fuel-preview-long"] thead');
+    const previewLongTbody = card.querySelector('table[data-kind="fuel-preview-long"] tbody');
+    const previewLongHint = card.querySelector('[data-kind="fuel-preview-long-hint"]');
+
+    function summarizeUnique(values, { maxItems = 2, maxChars = 90 } = {}) {
+      const uniq = Array.from(new Set(values.map((v) => (v === null || v === undefined ? "" : String(v).trim())).filter(Boolean)));
+      uniq.sort((a, b) => a.localeCompare(b));
+      if (uniq.length === 0) return { text: "—", title: "" };
+      const title = uniq.join("\n");
+      let text = uniq.slice(0, maxItems).join("; ");
+      if (text.length > maxChars) text = `${text.slice(0, Math.max(0, maxChars - 1))}…`;
+      if (uniq.length > maxItems) text += ` (+${uniq.length - maxItems})`;
+      return { text, title };
+    }
+
+    function dateRange(rows) {
+      let min = "";
+      let max = "";
+      for (const r of rows) {
+        const d = (r.date_of_price || "").trim();
+        if (!d) continue;
+        if (!min || d < min) min = d;
+        if (!max || d > max) max = d;
+      }
+      if (!min && !max) return "—";
+      if (min === max) return min;
+      return `${min} → ${max}`;
+    }
+
+    function recomputeGroups() {
+      const opt = groupByKey.get(activeGroupKey) || groupByKey.get(groupByDefault);
+      activeGroupKey = opt ? opt.key : groupByDefault;
+      byGroup = groupBy(fuelRows, (r) => opt.get(r));
+      groupKeys = Array.from(byGroup.keys()).sort((a, b) => String(a).localeCompare(String(b)));
+      groupTh.textContent = opt ? opt.label : "Group";
+      previewGroupLabel.textContent = opt ? `Group value (${opt.label})` : "Group value";
+    }
+
+    const renderWidePreview = () => {
       const stationId = (previewInput.value || "").trim();
+      previewWideMeta.innerHTML = "";
       previewThead.innerHTML = "";
       previewTbody.innerHTML = "";
       previewHint.textContent = "";
@@ -541,6 +668,13 @@ function renderTimeSeriesFromItems(items) {
         previewHint.textContent = "No rows found for this station id.";
         return;
       }
+
+      const creators = summarizeUnique(rows.map((r) => r.creator_national_identifier), { maxItems: 1, maxChars: 120 });
+      const countries = summarizeUnique(rows.map((r) => r.creator_country), { maxItems: 4, maxChars: 40 });
+      previewWideMeta.innerHTML = `
+        <div title="${escapeHtml(creators.title)}"><code>creator</code>: ${escapeHtml(creators.text)}</div>
+        <div title="${escapeHtml(countries.title)}"><code>country</code>: ${escapeHtml(countries.text)}</div>
+      `;
 
       const { fuels: fuelCols, rows: wideRows } = wideFuelRowsForStation(rows);
       const cols = ["date_of_price", ...fuelCols];
@@ -567,62 +701,161 @@ function renderTimeSeriesFromItems(items) {
       previewHint.textContent = wideRows.length > limit ? `Showing first ${limit} row(s) of ${wideRows.length}.` : "";
     };
 
+    const renderLongPreview = () => {
+      const groupValue = (previewGroupInput.value || "").trim();
+      previewLongThead.innerHTML = "";
+      previewLongTbody.innerHTML = "";
+      previewLongHint.textContent = "";
+      previewLongDownload.disabled = true;
+      previewWideDownload.disabled = true;
+
+      if (!groupValue) return;
+      const rows = byGroup.get(groupValue);
+      if (!rows || rows.length === 0) {
+        previewLongHint.textContent = "No rows found for this group value.";
+        return;
+      }
+
+      previewLongDownload.disabled = false;
+      previewWideDownload.disabled = !(activeGroupKey === "station_id");
+
+      const sorted = [...rows].sort((a, b) => String(a.date_of_price).localeCompare(String(b.date_of_price)));
+
+      const trHead = document.createElement("tr");
+      for (const col of longColumns) {
+        const th = document.createElement("th");
+        th.textContent = col;
+        trHead.appendChild(th);
+      }
+      previewLongThead.appendChild(trHead);
+
+      const limit = 200;
+      const shown = sorted.slice(0, limit);
+      for (const r of shown) {
+        const tr = document.createElement("tr");
+        for (const col of longColumns) {
+          const td = document.createElement("td");
+          td.textContent = r[col] || "";
+          tr.appendChild(td);
+        }
+        previewLongTbody.appendChild(tr);
+      }
+      previewLongHint.textContent = sorted.length > limit ? `Showing first ${limit} row(s) of ${sorted.length}.` : "";
+    };
+
     const renderTable = () => {
       const q = (filterInput.value || "").trim().toLowerCase();
       tbody.innerHTML = "";
 
-      for (const stationId of stations) {
-        if (q && !stationId.toLowerCase().includes(q)) continue;
-        const rows = byStation.get(stationId) || [];
+      for (const key of groupKeys) {
+        if (q && !String(key).toLowerCase().includes(q)) continue;
+        const rows = byGroup.get(key) || [];
         const fuels = Array.from(new Set(rows.map((r) => r.fuel))).filter(Boolean).sort();
-        const dates = rows.map((r) => r.date_of_price).filter(Boolean).sort();
-        const range = dates.length ? `${dates[0]} → ${dates[dates.length - 1]}` : "—";
+        const creators = summarizeUnique(rows.map((r) => r.creator_national_identifier));
+        const countries = summarizeUnique(rows.map((r) => r.creator_country), { maxItems: 4, maxChars: 40 });
+        const range = dateRange(rows);
 
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td class="clickable"><code>${escapeHtml(stationId)}</code></td>
+          <td class="clickable"><code class="truncate" title="${escapeHtml(String(key))}">${escapeHtml(String(key))}</code></td>
           <td>${rows.length}</td>
           <td>${escapeHtml(range)}</td>
           <td>${escapeHtml(fuels.join(", "))}</td>
+          <td title="${escapeHtml(creators.title)}">${escapeHtml(creators.text)}</td>
+          <td title="${escapeHtml(countries.title)}">${escapeHtml(countries.text)}</td>
           <td class="actions-cell">
             <button class="btn" data-action="dl-long">CSV (long)</button>
-            <button class="btn" data-action="dl-wide">CSV (wide)</button>
+            ${
+              activeGroupKey === "station_id"
+                ? `<button class="btn" data-action="dl-wide">CSV (wide)</button>`
+                : ""
+            }
           </td>
         `;
 
         tr.querySelector("td.clickable").addEventListener("click", () => {
-          previewInput.value = stationId;
-          previewDetails.open = true;
-          renderPreview();
+          previewGroupInput.value = String(key);
+          previewLongDetails.open = true;
+          renderLongPreview();
+
+          if (activeGroupKey === "station_id") {
+            previewInput.value = String(key);
+            previewWideDetails.open = true;
+            renderWidePreview();
+          }
         });
 
         tr.querySelector('[data-action="dl-long"]').addEventListener("click", () => {
           const sorted = [...rows].sort((a, b) => String(a.date_of_price).localeCompare(String(b.date_of_price)));
-          downloadCsv(`fuel_prices_${safeFileName(stationId)}_long.csv`, sorted, [
-            "station_id",
-            "station_version",
-            "fuel",
-            "price",
-            "date_of_price",
-            "publication_id",
-            "publication_type",
-            "binary_id",
-          ]);
+          downloadCsv(`fuel_prices_${safeFileName(activeGroupKey)}_${safeFileName(key)}_long.csv`, sorted, longColumns);
         });
 
-        tr.querySelector('[data-action="dl-wide"]').addEventListener("click", () => {
-          const { fuels: fuelCols, rows: wideRows } = wideFuelRowsForStation(rows);
-          const cols = ["date_of_price", ...fuelCols];
-          downloadCsv(`fuel_prices_${safeFileName(stationId)}_wide.csv`, wideRows, cols);
-        });
+        const dlWide = tr.querySelector('[data-action="dl-wide"]');
+        if (dlWide) {
+          dlWide.addEventListener("click", () => {
+            const { fuels: fuelCols, rows: wideRows } = wideFuelRowsForStation(rows);
+            const cols = ["station_id", "creator_country", "creator_national_identifier", "date_of_price", ...fuelCols];
+            downloadCsv(`fuel_prices_${safeFileName(activeGroupKey)}_${safeFileName(key)}_wide.csv`, wideRows, cols);
+          });
+        }
 
         tbody.appendChild(tr);
       }
     };
 
+    const renderGroupButtons = () => {
+      groupButtons.innerHTML = "";
+      for (const opt of groupOptions) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn toggle";
+        btn.textContent = opt.label;
+        btn.dataset.groupKey = opt.key;
+        btn.classList.toggle("active", opt.key === activeGroupKey);
+        btn.addEventListener("click", () => {
+          activeGroupKey = opt.key;
+          filterInput.value = "";
+          previewInput.value = "";
+          previewGroupInput.value = "";
+          previewWideDetails.open = false;
+          previewLongDetails.open = false;
+          recomputeGroups();
+          renderGroupButtons();
+          renderTable();
+
+          previewWideDetails.style.display = activeGroupKey === "station_id" ? "" : "none";
+          previewWideDownload.style.display = activeGroupKey === "station_id" ? "" : "none";
+        });
+        groupButtons.appendChild(btn);
+      }
+    };
+
+    previewLongDownload.addEventListener("click", () => {
+      const groupValue = (previewGroupInput.value || "").trim();
+      const rows = byGroup.get(groupValue) || [];
+      const sorted = [...rows].sort((a, b) => String(a.date_of_price).localeCompare(String(b.date_of_price)));
+      downloadCsv(`fuel_prices_${safeFileName(activeGroupKey)}_${safeFileName(groupValue)}_long.csv`, sorted, longColumns);
+    });
+
+    previewWideDownload.addEventListener("click", () => {
+      const groupValue = (previewGroupInput.value || "").trim();
+      const rows = byGroup.get(groupValue) || [];
+      const { fuels: fuelCols, rows: wideRows } = wideFuelRowsForStation(rows);
+      const cols = ["station_id", "creator_country", "creator_national_identifier", "date_of_price", ...fuelCols];
+      downloadCsv(`fuel_prices_${safeFileName(activeGroupKey)}_${safeFileName(groupValue)}_wide.csv`, wideRows, cols);
+    });
+
     filterInput.addEventListener("input", renderTable);
-    previewInput.addEventListener("input", renderPreview);
+    previewInput.addEventListener("input", renderWidePreview);
+    previewGroupInput.addEventListener("input", renderLongPreview);
+
+    recomputeGroups();
+    renderGroupButtons();
     renderTable();
+    renderLongPreview();
+
+    previewWideDetails.style.display = activeGroupKey === "station_id" ? "" : "none";
+    previewWideDownload.style.display = activeGroupKey === "station_id" ? "" : "none";
 
     results.appendChild(card);
   }
@@ -650,6 +883,8 @@ function renderTimeSeriesFromItems(items) {
         "station_version",
         "start_of_period",
         "end_of_period",
+        "creator_country",
+        "creator_national_identifier",
         "publication_id",
         "publication_type",
         "binary_id",
@@ -711,7 +946,7 @@ async function tryFetchViaHelperServer(endpoint, p12File, passphrase) {
     });
   } catch (e) {
     throw new Error(
-      `Cannot reach helper server at ${baseUrl}. Start it with “ruby server.rb” (no Node needed) or “node server.mjs” (requires Node.js), or open the page with ?helper=http://127.0.0.1:5173`,
+      `Cannot reach helper server at ${baseUrl}. Start it with “ruby server.rb” (or double-click “start.command”), or open the page with ?helper=http://127.0.0.1:5173`,
     );
   }
 

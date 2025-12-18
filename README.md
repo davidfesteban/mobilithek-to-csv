@@ -9,7 +9,22 @@ This is a small, fully static `index.html` tool that:
 
 ## Use
 
-1. Open `index.html` in a modern browser.
+### Option A (recommended): start the local Ruby helper + UI
+
+On macOS you can just double-click `start.command`.
+
+Or run it manually:
+
+```bash
+ruby server.rb
+```
+
+This serves the UI at `http://127.0.0.1:5173` and provides `/api/fetch` so the page can fetch Mobilithek using your
+`.p12/.pfx` client certificate (mTLS).
+
+### Option B: decode an existing XML response (no server)
+
+1. Open `index.html` in a modern browser (anywhere, including `file://`).
 2. Get a Mobilithek response:
    - Click **Open endpoint in new tab** (browser will handle client-certificate selection), then save/copy the XML.
    - Or click **Try fetch**:
@@ -18,16 +33,15 @@ This is a small, fully static `index.html` tool that:
 3. Paste the XML into the textarea (or load the saved XML file) and click **Decode binaries**.
 4. Download CSV from the **Fuel prices (time series)** section, or download decoded binaries as `decoded_binaries.json` / `decoded_binaries.xml` to inspect before CSV conversion.
 
-## Optional: local helper server (recommended)
+## Helper server notes
 
-If you want the page to fetch Mobilithek using your `.p12/.pfx` + passphrase, run the included helper server (Ruby recommended if you don’t have Node):
+- The browser cannot use a user-selected `.p12/.pfx` for mTLS from JavaScript, and Mobilithek responses are often blocked
+  by CORS. The Ruby helper server is the portable workaround.
+- You can change bind address/port:
 
-1. Run one of:
-   - `ruby server.rb`
-   - `node server.mjs` (Node.js 18+)
-     - Install Node with: `brew install node`
-2. Open: `http://127.0.0.1:5173`
-3. Select the `.p12`, enter the passphrase, and click **Try fetch**.
+```bash
+HOST=127.0.0.1 PORT=5173 ruby server.rb
+```
 
 If you opened `index.html` via `file://` and still want to use the helper server, open:
 

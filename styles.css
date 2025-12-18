@@ -170,6 +170,7 @@ code {
   border-radius: 12px;
   padding: 12px;
   background: rgba(0, 0, 0, 0.15);
+  min-width: 0;
 }
 
 .result h3 {
@@ -187,16 +188,19 @@ code {
 }
 
 .table-wrap {
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   background: rgba(0, 0, 0, 0.14);
 }
 
 .table {
-  width: 100%;
+  width: max-content;
   border-collapse: collapse;
-  min-width: 720px;
+  min-width: 100%;
 }
 
 .table th,
@@ -237,6 +241,36 @@ code {
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 10px;
+}
+
+.group-controls {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.group-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.btn.toggle {
+  padding: 8px 10px;
+}
+
+.btn.toggle.active {
+  border-color: rgba(122, 162, 255, 0.7);
+  background: rgba(122, 162, 255, 0.24);
+}
+
+code.truncate {
+  display: inline-block;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
 }
 
 .downloads .btn {
