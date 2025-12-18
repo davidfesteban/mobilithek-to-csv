@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mobilithek Binary Downloader</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="header">
+        <h1>Mobilithek Binary Downloader</h1>
+        <p class="muted">
+          Extracts all <code>&lt;binary&gt;</code> blocks from a Mobilithek response, decodes Base64, and offers downloads
+          (and gunzip when possible).
+        </p>
+      </header>
+
+      <section class="card">
+        <form id="fetch-form" class="form">
+          <h2 class="section-title">1) Fetch (optional)</h2>
+          <div class="field">
+            <label for="endpoint">Mobilithek endpoint (https)</label>
+            <input
+              id="endpoint"
+              name="endpoint"
+              type="url"
+              spellcheck="false"
+              placeholder="https://mobilithek.info:8443/mobilithek/api/v1.0/container/subscription?subscriptionID=..."
+              value="https://mobilithek.info:8443/mobilithek/api/v1.0/container/subscription?subscriptionID="
+            />
+          </div>
+
+          <div class="field">
+            <label for="p12">Client certificate (.p12 / .pfx)</label>
+            <input id="p12" name="p12" type="file" accept=".p12,.pfx,application/x-pkcs12" />
+            <p class="muted small">
+              Browsers cannot use a selected <code>.p12</code> for HTTPS client-auth from JavaScript. If you pick a
+              certificate here, the page will call the local helper server (<code>server.rb</code>/<code>server.mjs</code>)
+              to fetch with mTLS (run <code>ruby server.rb</code> or <code>node server.mjs</code> and open
+              <code>http://127.0.0.1:5173</code>).
+            </p>
+          </div>
+
+          <div class="field">
+            <label for="passphrase">Passphrase</label>
+            <input id="passphrase" name="passphrase" type="password" autocomplete="off" />
+            <p class="muted small">Used only when fetching via the local helper server.</p>
+          </div>
+
+          <div class="actions">
+            <button id="fetch" class="btn primary" type="submit">Try fetch</button>
+            <button id="open" class="btn" type="button">Open endpoint in new tab</button>
+            <button id="clear" class="btn" type="button">Clear</button>
+          </div>
+
+          <p class="muted small">
+            If browser fetch is blocked (usually CORS), run the helper server or open the endpoint in a new tab, then
+            save/copy the XML and decode below.
+          </p>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">2) Decode</h2>
+        <div class="field">
+          <label for="xmlFile">Mobilithek response file (XML)</label>
+          <input id="xmlFile" name="xmlFile" type="file" accept=".xml,.txt,application/xml,text/xml,text/plain" />
+        </div>
+        <div class="field">
+          <label for="xmlText">Mobilithek response (paste XML)</label>
+          <textarea id="xmlText" name="xmlText" rows="10" spellcheck="false" placeholder="Paste the full XML response here…"></textarea>
+        </div>
+        <div class="actions">
+          <button id="decode" class="btn primary" type="button">Decode binaries</button>
+          <button id="downloadResponse" class="btn" type="button">Download response.xml</button>
+        </div>
+
+        <div class="status" id="status" role="status" aria-live="polite"></div>
+        <div id="results" class="results"></div>
+      </section>
+
+      <footer class="footer muted small">
+        Tip: if you see a single <code>base64BinaryDatex2</code> item, the decoded download is usually Datex II XML.
+      </footer>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
