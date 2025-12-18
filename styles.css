@@ -159,6 +159,12 @@ code {
   gap: 12px;
 }
 
+.details summary {
+  cursor: pointer;
+  font-weight: 700;
+  padding: 8px 2px;
+}
+
 .result {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -178,6 +184,52 @@ code {
   margin: 8px 0 10px;
   color: var(--muted);
   font-size: 0.92rem;
+}
+
+.table-wrap {
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+.table th,
+.table td {
+  padding: 10px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+  vertical-align: top;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  background: rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(8px);
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.table td.actions-cell {
+  white-space: nowrap;
+}
+
+.table td.clickable {
+  cursor: pointer;
+}
+
+.table td.clickable:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.table td code {
+  font-size: 0.85em;
 }
 
 .downloads {

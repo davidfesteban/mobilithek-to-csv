@@ -5,7 +5,7 @@ This is a small, fully static `index.html` tool that:
 - extracts all `<binary>` elements from a Mobilithek XML response
 - Base64-decodes them
 - optionally gunzips them (when the decoded bytes are gzip)
-- lets you download each item
+- extracts FuelPricePublication time series and exports CSV (and keeps raw binaries downloadable)
 
 ## Use
 
@@ -16,6 +16,7 @@ This is a small, fully static `index.html` tool that:
      - with a selected `.p12/.pfx`: uses the local helper server (recommended)
      - without a certificate: uses browser `fetch()` (often blocked by CORS)
 3. Paste the XML into the textarea (or load the saved XML file) and click **Decode binaries**.
+4. Download CSV from the **Fuel prices (time series)** section, or download decoded binaries as `decoded_binaries.json` / `decoded_binaries.xml` to inspect before CSV conversion.
 
 ## Optional: local helper server (recommended)
 

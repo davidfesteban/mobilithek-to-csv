@@ -4,6 +4,9 @@ function setStatus(message, { error = false } = {}) {
   el.classList.toggle("error", Boolean(error));
 }
 
+let lastDecodedItems = [];
+let lastResponseXml = "";
+
 async function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -28,6 +31,26 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function csvEscape(value) {
+  const str = value === null || value === undefined ? "" : String(value);
+  if (/[",\r\n]/.test(str)) return `"${str.replaceAll('"', '""')}"`;
+  return str;
+}
+
+function rowsToCsv(rows, columns) {
+  const header = columns.map(csvEscape).join(",");
+  const lines = [header];
+  for (const row of rows) {
+    lines.push(columns.map((c) => csvEscape(row[c])).join(","));
+  }
+  return `${lines.join("\r\n")}\r\n`;
+}
+
+function downloadCsv(filename, rows, columns) {
+  const csv = rowsToCsv(rows, columns);
+  triggerDownload(filename, new TextEncoder().encode(csv), "text/csv");
+}
+
 function safeFileName(value) {
   const base = String(value || "file").trim() || "file";
   return base.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 180) || "file";
@@ -38,6 +61,16 @@ function bytesToHex(bytes, max = 16) {
   return Array.from(slice)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function bytesToBase64(bytes) {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }
 
 function looksGzip(bytes) {
@@ -154,6 +187,114 @@ function extractBinaryItems(xmlText) {
   });
 }
 
+function tryParseXmlText(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return null;
+  if (!normalized.startsWith("<") && !normalized.startsWith("<?xml")) return null;
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(normalized, "application/xml");
+  const parserError = doc.getElementsByTagName("parsererror")[0];
+  if (parserError) return null;
+  return doc;
+}
+
+function getText(el) {
+  if (!el) return "";
+  return (el.textContent || "").trim();
+}
+
+function groupBy(rows, keyFn) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = keyFn(row);
+    const list = map.get(key);
+    if (list) list.push(row);
+    else map.set(key, [row]);
+  }
+  return map;
+}
+
+function extractFuelPricePublication(doc, { binaryId }) {
+  const root = doc.documentElement;
+  const extensionName = root ? root.getAttribute("extensionName") || "" : "";
+
+  const payloads = Array.from(doc.getElementsByTagNameNS("*", "payloadPublication"));
+  const isFuelPrice =
+    extensionName === "FuelPricePublication" ||
+    payloads.some((p) => (p.getAttribute("xsi:type") || "").includes("FuelPricePublication"));
+  if (!isFuelPrice) return null;
+
+  const fuelRows = [];
+  const overrideRows = [];
+
+  for (const payload of payloads) {
+    const publicationId = payload.getAttribute("id") || "";
+    const publicationType = payload.getAttribute("xsi:type") || extensionName || "";
+
+    const stationInfos = Array.from(payload.getElementsByTagNameNS("*", "petrolStationInformation"));
+    for (const info of stationInfos) {
+      const stationRef = info.getElementsByTagNameNS("*", "petrolStationReference")[0] || null;
+      const stationId = stationRef ? stationRef.getAttribute("id") || "" : "";
+      const stationVersion = stationRef ? stationRef.getAttribute("version") || "" : "";
+
+      for (const child of Array.from(info.children || [])) {
+        const local = child.localName || "";
+        if (!local.startsWith("fuelPrice")) continue;
+        const fuel = local.replace(/^fuelPrice/, "") || "Unknown";
+        const price = getText(child.getElementsByTagNameNS("*", "price")[0]);
+        const dateOfPrice = getText(child.getElementsByTagNameNS("*", "dateOfPrice")[0]);
+        if (!price && !dateOfPrice) continue;
+
+        fuelRows.push({
+          station_id: stationId,
+          station_version: stationVersion,
+          fuel,
+          price,
+          date_of_price: dateOfPrice,
+          publication_id: publicationId,
+          publication_type: publicationType,
+          binary_id: binaryId,
+        });
+      }
+
+      const overrides = Array.from(info.getElementsByTagNameNS("*", "overrideOpen"));
+      for (const ov of overrides) {
+        const startOfPeriod = getText(ov.getElementsByTagNameNS("*", "startOfPeriod")[0]);
+        const endOfPeriod = getText(ov.getElementsByTagNameNS("*", "endOfPeriod")[0]);
+        if (!startOfPeriod && !endOfPeriod) continue;
+        overrideRows.push({
+          station_id: stationId,
+          station_version: stationVersion,
+          start_of_period: startOfPeriod,
+          end_of_period: endOfPeriod,
+          publication_id: publicationId,
+          publication_type: publicationType,
+          binary_id: binaryId,
+        });
+      }
+    }
+  }
+
+  return { fuelRows, overrideRows };
+}
+
+function wideFuelRowsForStation(rows) {
+  const fuels = Array.from(new Set(rows.map((r) => r.fuel))).filter(Boolean).sort();
+  const byDate = groupBy(rows, (r) => r.date_of_price || "");
+  const dates = Array.from(byDate.keys()).filter(Boolean).sort();
+
+  const out = [];
+  for (const date of dates) {
+    const row = { date_of_price: date };
+    for (const fuel of fuels) row[fuel] = "";
+    for (const r of byDate.get(date) || []) row[r.fuel] = r.price;
+    out.push(row);
+  }
+
+  return { fuels, rows: out };
+}
+
 async function decodeXmlToItems(xmlText) {
   const bins = extractBinaryItems(xmlText);
   const out = [];
@@ -202,8 +343,8 @@ async function decodeXmlToItems(xmlText) {
   return out;
 }
 
-function renderResults(items) {
-  const results = document.getElementById("results");
+function renderRawBinaries(items, targetEl) {
+  const results = targetEl || document.getElementById("rawResults") || document.getElementById("results");
   results.innerHTML = "";
 
   if (items.length === 0) {
@@ -271,6 +412,261 @@ function renderResults(items) {
     }
     results.appendChild(card);
   }
+}
+
+function renderTimeSeriesFromItems(items) {
+  const results = document.getElementById("results");
+  results.innerHTML = "";
+
+  if (!items || items.length === 0) {
+    return { fuelRows: 0, overrideRows: 0, parsedXmlBinaries: 0, fuelBinaries: 0 };
+  }
+
+  const fuelRows = [];
+  const overrideRows = [];
+  let parsedXmlBinaries = 0;
+  let fuelBinaries = 0;
+
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+
+  for (const item of items) {
+    if (item.error) continue;
+    if (!item.decodedBytes || !item.decodedInfo || item.decodedInfo.ext !== "xml") continue;
+
+    const text = decoder.decode(item.decodedBytes);
+    const doc = tryParseXmlText(text);
+    if (!doc) continue;
+    parsedXmlBinaries++;
+
+    const extracted = extractFuelPricePublication(doc, { binaryId: item.id || String(item.index + 1) });
+    if (!extracted) continue;
+    fuelBinaries++;
+    fuelRows.push(...extracted.fuelRows);
+    overrideRows.push(...extracted.overrideRows);
+  }
+
+  const hasFuel = fuelRows.length > 0;
+  const hasOverrides = overrideRows.length > 0;
+
+  if (!hasFuel && !hasOverrides) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = `No FuelPricePublication records extracted (parsed XML binaries: ${parsedXmlBinaries}/${items.length}). Showing raw binaries below.`;
+    results.appendChild(empty);
+
+    const rawDetails = document.createElement("details");
+    rawDetails.className = "details";
+    rawDetails.open = false;
+    rawDetails.innerHTML = `<summary>Raw binaries (${items.length})</summary><div id="rawResults" class="results"></div>`;
+    results.appendChild(rawDetails);
+    renderRawBinaries(items, rawDetails.querySelector("#rawResults"));
+    return { fuelRows: 0, overrideRows: 0, parsedXmlBinaries, fuelBinaries };
+  }
+
+  if (hasFuel) {
+    const byStation = groupBy(fuelRows, (r) => r.station_id || "(missing station_id)");
+    const stations = Array.from(byStation.keys()).sort();
+
+    const card = document.createElement("div");
+    card.className = "result";
+    card.innerHTML = `
+      <h3>Fuel prices (time series)</h3>
+      <div class="meta">
+        <div><code>rows</code>: ${fuelRows.length}</div>
+        <div><code>stations</code>: ${stations.length}</div>
+      </div>
+      <div class="downloads">
+        <button class="btn primary" data-action="download-fuel-all">Download all (long CSV)</button>
+      </div>
+      <div class="field">
+        <label for="fuelFilter">Filter station id</label>
+        <input id="fuelFilter" type="text" spellcheck="false" placeholder="Type to filter…">
+      </div>
+      <div class="table-wrap"><table class="table" data-kind="fuel">
+        <thead><tr>
+          <th>Station id</th>
+          <th>Rows</th>
+          <th>Date range</th>
+          <th>Fuels</th>
+          <th>Download</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <details class="details" data-kind="preview">
+        <summary>Preview station (wide table)</summary>
+        <div class="field">
+          <label for="fuelPreviewStation">Station id</label>
+          <input id="fuelPreviewStation" type="text" spellcheck="false" placeholder="Click a station above or paste id…">
+        </div>
+        <div class="table-wrap"><table class="table" data-kind="fuel-preview">
+          <thead></thead>
+          <tbody></tbody>
+        </table></div>
+        <p class="muted small" data-kind="fuel-preview-hint"></p>
+      </details>
+    `;
+
+    const downloadAll = card.querySelector('[data-action="download-fuel-all"]');
+    downloadAll.addEventListener("click", () => {
+      const sorted = [...fuelRows].sort((a, b) => String(a.date_of_price).localeCompare(String(b.date_of_price)));
+      downloadCsv("fuel_prices_long.csv", sorted, [
+        "station_id",
+        "station_version",
+        "fuel",
+        "price",
+        "date_of_price",
+        "publication_id",
+        "publication_type",
+        "binary_id",
+      ]);
+    });
+
+    const tbody = card.querySelector('table[data-kind="fuel"] tbody');
+    const filterInput = card.querySelector("#fuelFilter");
+    const previewDetails = card.querySelector('details[data-kind="preview"]');
+    const previewInput = card.querySelector("#fuelPreviewStation");
+    const previewThead = card.querySelector('table[data-kind="fuel-preview"] thead');
+    const previewTbody = card.querySelector('table[data-kind="fuel-preview"] tbody');
+    const previewHint = card.querySelector('[data-kind="fuel-preview-hint"]');
+
+    const renderPreview = () => {
+      const stationId = (previewInput.value || "").trim();
+      previewThead.innerHTML = "";
+      previewTbody.innerHTML = "";
+      previewHint.textContent = "";
+
+      if (!stationId) return;
+      const rows = byStation.get(stationId);
+      if (!rows || rows.length === 0) {
+        previewHint.textContent = "No rows found for this station id.";
+        return;
+      }
+
+      const { fuels: fuelCols, rows: wideRows } = wideFuelRowsForStation(rows);
+      const cols = ["date_of_price", ...fuelCols];
+
+      const trHead = document.createElement("tr");
+      for (const col of cols) {
+        const th = document.createElement("th");
+        th.textContent = col;
+        trHead.appendChild(th);
+      }
+      previewThead.appendChild(trHead);
+
+      const limit = 50;
+      const shown = wideRows.slice(0, limit);
+      for (const r of shown) {
+        const tr = document.createElement("tr");
+        for (const col of cols) {
+          const td = document.createElement("td");
+          td.textContent = r[col] || "";
+          tr.appendChild(td);
+        }
+        previewTbody.appendChild(tr);
+      }
+      previewHint.textContent = wideRows.length > limit ? `Showing first ${limit} row(s) of ${wideRows.length}.` : "";
+    };
+
+    const renderTable = () => {
+      const q = (filterInput.value || "").trim().toLowerCase();
+      tbody.innerHTML = "";
+
+      for (const stationId of stations) {
+        if (q && !stationId.toLowerCase().includes(q)) continue;
+        const rows = byStation.get(stationId) || [];
+        const fuels = Array.from(new Set(rows.map((r) => r.fuel))).filter(Boolean).sort();
+        const dates = rows.map((r) => r.date_of_price).filter(Boolean).sort();
+        const range = dates.length ? `${dates[0]} → ${dates[dates.length - 1]}` : "—";
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="clickable"><code>${escapeHtml(stationId)}</code></td>
+          <td>${rows.length}</td>
+          <td>${escapeHtml(range)}</td>
+          <td>${escapeHtml(fuels.join(", "))}</td>
+          <td class="actions-cell">
+            <button class="btn" data-action="dl-long">CSV (long)</button>
+            <button class="btn" data-action="dl-wide">CSV (wide)</button>
+          </td>
+        `;
+
+        tr.querySelector("td.clickable").addEventListener("click", () => {
+          previewInput.value = stationId;
+          previewDetails.open = true;
+          renderPreview();
+        });
+
+        tr.querySelector('[data-action="dl-long"]').addEventListener("click", () => {
+          const sorted = [...rows].sort((a, b) => String(a.date_of_price).localeCompare(String(b.date_of_price)));
+          downloadCsv(`fuel_prices_${safeFileName(stationId)}_long.csv`, sorted, [
+            "station_id",
+            "station_version",
+            "fuel",
+            "price",
+            "date_of_price",
+            "publication_id",
+            "publication_type",
+            "binary_id",
+          ]);
+        });
+
+        tr.querySelector('[data-action="dl-wide"]').addEventListener("click", () => {
+          const { fuels: fuelCols, rows: wideRows } = wideFuelRowsForStation(rows);
+          const cols = ["date_of_price", ...fuelCols];
+          downloadCsv(`fuel_prices_${safeFileName(stationId)}_wide.csv`, wideRows, cols);
+        });
+
+        tbody.appendChild(tr);
+      }
+    };
+
+    filterInput.addEventListener("input", renderTable);
+    previewInput.addEventListener("input", renderPreview);
+    renderTable();
+
+    results.appendChild(card);
+  }
+
+  if (hasOverrides) {
+    const byStation = groupBy(overrideRows, (r) => r.station_id || "(missing station_id)");
+    const stations = Array.from(byStation.keys()).sort();
+
+    const card = document.createElement("div");
+    card.className = "result";
+    card.innerHTML = `
+      <h3>Override open periods</h3>
+      <div class="meta">
+        <div><code>rows</code>: ${overrideRows.length}</div>
+        <div><code>stations</code>: ${stations.length}</div>
+      </div>
+      <div class="downloads">
+        <button class="btn primary" data-action="download-ov-all">Download all (CSV)</button>
+      </div>
+    `;
+    card.querySelector('[data-action="download-ov-all"]').addEventListener("click", () => {
+      const sorted = [...overrideRows].sort((a, b) => String(a.start_of_period).localeCompare(String(b.start_of_period)));
+      downloadCsv("override_open.csv", sorted, [
+        "station_id",
+        "station_version",
+        "start_of_period",
+        "end_of_period",
+        "publication_id",
+        "publication_type",
+        "binary_id",
+      ]);
+    });
+
+    results.appendChild(card);
+  }
+
+  const rawDetails = document.createElement("details");
+  rawDetails.className = "details";
+  rawDetails.open = false;
+  rawDetails.innerHTML = `<summary>Raw binaries (${items.length})</summary><div id="rawResults" class="results"></div>`;
+  results.appendChild(rawDetails);
+  renderRawBinaries(items, rawDetails.querySelector("#rawResults"));
+
+  return { fuelRows: fuelRows.length, overrideRows: overrideRows.length, parsedXmlBinaries, fuelBinaries };
 }
 
 function setXmlText(value) {
@@ -393,13 +789,23 @@ async function decodeAndRender(xmlText) {
   const normalized = String(xmlText || "").trim();
   if (!normalized) {
     setStatus("Paste or load an XML response first.", { error: true });
-    renderResults([]);
+    renderTimeSeriesFromItems([]);
     return;
   }
   setStatus("Extracting <binary> blocks…");
   const items = await decodeXmlToItems(normalized);
-  setStatus(`Found ${items.length} binary item(s).`);
-  renderResults(items);
+  lastResponseXml = normalized;
+  lastDecodedItems = items;
+
+  setStatus(`Decoded ${items.length} binary item(s). Building time series…`);
+  const summary = renderTimeSeriesFromItems(items);
+  if (summary.fuelRows || summary.overrideRows) {
+    setStatus(
+      `Fuel rows: ${summary.fuelRows || 0} · Overrides: ${summary.overrideRows || 0} · Parsed XML: ${summary.parsedXmlBinaries}/${items.length}`,
+    );
+  } else {
+    setStatus(`Decoded ${items.length} binary item(s).`);
+  }
 }
 
 function downloadResponseXml() {
@@ -409,6 +815,123 @@ function downloadResponseXml() {
     return;
   }
   triggerDownload("response.xml", new TextEncoder().encode(xmlText), "application/xml");
+}
+
+function safeCdataText(text) {
+  return String(text || "").replaceAll("]]>", "]]]]><![CDATA[>");
+}
+
+function escapeXmlAttr(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function requireDecodedItems() {
+  const currentXml = getXmlText().trim();
+  if (currentXml && lastResponseXml && currentXml !== lastResponseXml) {
+    setStatus("XML changed since last decode. Click “Decode binaries” again first.", { error: true });
+    return null;
+  }
+  if (!lastDecodedItems || lastDecodedItems.length === 0) {
+    setStatus("Nothing decoded yet. Click “Decode binaries” first.", { error: true });
+    return null;
+  }
+  return lastDecodedItems;
+}
+
+function downloadDecodedJson() {
+  const items = requireDecodedItems();
+  if (!items) return;
+
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const exported = items.map((it) => {
+    const raw = {
+      bytes: it.rawBytes ? it.rawBytes.length : 0,
+      ext: it.rawInfo ? it.rawInfo.ext : "",
+      mime: it.rawInfo ? it.rawInfo.mime : "",
+    };
+    const decoded = {
+      bytes: it.decodedBytes ? it.decodedBytes.length : 0,
+      ext: it.decodedInfo ? it.decodedInfo.ext : "",
+      mime: it.decodedInfo ? it.decodedInfo.mime : "",
+      isText: it.decodedInfo ? Boolean(it.decodedInfo.isText) : false,
+    };
+
+    const out = {
+      id: it.id || "",
+      type: it.type || "",
+      wasGunzipped: Boolean(it.wasGunzipped),
+      error: it.error || null,
+      gunzipError: it.gunzipError || null,
+      raw,
+      decoded,
+      preview: it.preview || "",
+    };
+
+    if (!it.error && it.decodedBytes && decoded.isText) {
+      out.decodedText = decoder.decode(it.decodedBytes);
+    } else if (!it.error && it.decodedBytes) {
+      out.decodedBase64 = bytesToBase64(it.decodedBytes);
+    }
+
+    return out;
+  });
+
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    responseXmlLength: lastResponseXml ? lastResponseXml.length : 0,
+    items: exported,
+  };
+
+  triggerDownload(
+    "decoded_binaries.json",
+    new TextEncoder().encode(JSON.stringify(payload, null, 2)),
+    "application/json",
+  );
+}
+
+function downloadDecodedXml() {
+  const items = requireDecodedItems();
+  if (!items) return;
+
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+  xml += `<decodedBinaries generatedAt="${escapeXmlAttr(new Date().toISOString())}">\n`;
+
+  for (const it of items) {
+    const id = it.id || "";
+    const type = it.type || "";
+    const rawBytes = it.rawBytes ? it.rawBytes.length : 0;
+    const decodedBytes = it.decodedBytes ? it.decodedBytes.length : 0;
+    const rawExt = it.rawInfo ? it.rawInfo.ext : "";
+    const decodedExt = it.decodedInfo ? it.decodedInfo.ext : "";
+    const rawMime = it.rawInfo ? it.rawInfo.mime : "";
+    const decodedMime = it.decodedInfo ? it.decodedInfo.mime : "";
+
+    xml += `  <binary id="${escapeXmlAttr(id)}" type="${escapeXmlAttr(type)}" rawBytes="${rawBytes}" decodedBytes="${decodedBytes}" rawExt="${escapeXmlAttr(rawExt)}" decodedExt="${escapeXmlAttr(decodedExt)}" rawMime="${escapeXmlAttr(rawMime)}" decodedMime="${escapeXmlAttr(decodedMime)}" wasGunzipped="${it.wasGunzipped ? "true" : "false"}">\n`;
+
+    if (it.error) {
+      xml += `    <error><![CDATA[${safeCdataText(it.error)}]]></error>\n`;
+    } else if (it.gunzipError) {
+      xml += `    <gunzipError><![CDATA[${safeCdataText(it.gunzipError)}]]></gunzipError>\n`;
+    }
+
+    if (!it.error && it.decodedBytes && it.decodedInfo && it.decodedInfo.isText) {
+      const text = decoder.decode(it.decodedBytes);
+      xml += `    <decoded><![CDATA[${safeCdataText(text)}]]></decoded>\n`;
+    } else if (!it.error && it.decodedBytes) {
+      xml += `    <decodedBase64><![CDATA[${bytesToBase64(it.decodedBytes)}]]></decodedBase64>\n`;
+    }
+
+    xml += "  </binary>\n";
+  }
+
+  xml += `</decodedBinaries>\n`;
+  triggerDownload("decoded_binaries.xml", new TextEncoder().encode(xml), "application/xml");
 }
 
 document.getElementById("fetch-form").addEventListener("submit", async (e) => {
@@ -437,7 +960,9 @@ document.getElementById("clear").addEventListener("click", () => {
   document.getElementById("fetch-form").reset();
   setXmlText("");
   setStatus("");
-  renderResults([]);
+  lastResponseXml = "";
+  lastDecodedItems = [];
+  renderTimeSeriesFromItems([]);
 });
 
 document.getElementById("xmlFile").addEventListener("change", async (e) => {
@@ -459,3 +984,5 @@ document.getElementById("decode").addEventListener("click", async () => {
 });
 
 document.getElementById("downloadResponse").addEventListener("click", downloadResponseXml);
+document.getElementById("downloadDecodedJson").addEventListener("click", downloadDecodedJson);
+document.getElementById("downloadDecodedXml").addEventListener("click", downloadDecodedXml);
